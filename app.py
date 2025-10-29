@@ -8,9 +8,14 @@
 """
 import os
 import re
+import sys
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from wechat.crypto import WXBizMsgCrypt
+
+# 导入企业微信官方 SDK
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'weworkapi_python-master', 'callback_python3'))
+from WXBizMsgCrypt import WXBizMsgCrypt
+import xml.etree.ElementTree as ET
 from wechat.api import WeChatAPI
 from github_api.api import GitHubAPI
 from utils.locks import TaskLock
@@ -34,10 +39,10 @@ else:
     app.logger.info("未配置代理")
 
 # 初始化组件
-wx_crypto = WXBizMsgCrypt(
-    token=os.getenv('TOKEN'),
-    encoding_aes_key=os.getenv('ENCODING_AES_KEY'),
-    corp_id=os.getenv('CORP_ID')
+wx_crypt = WXBizMsgCrypt(
+    os.getenv('TOKEN'),
+    os.getenv('ENCODING_AES_KEY'),
+    os.getenv('CORP_ID')
 )
 
 wx_api = WeChatAPI(
@@ -215,7 +220,9 @@ def wechat_callback():
             return '缺少参数', 400
         
         try:
-            result = wx_crypto.verify_url(msg_signature, timestamp, nonce, echostr)
+            ret, result = wx_crypt.VerifyURL(msg_signature, timestamp, nonce, echostr)
+            if ret != 0:
+                return '验证失败', 400
             return result, 200
         except Exception as e:
             app.logger.error(f"验证失败: {str(e)}")
@@ -232,19 +239,28 @@ def wechat_callback():
         
         try:
             # 解密消息
-            msg_data = wx_crypto.decrypt_msg(
+            ret, xml_content = wx_crypt.DecryptMsg(
+                request.get_data().decode('utf-8'),
                 msg_signature,
                 timestamp,
-                nonce,
-                request.get_data().decode('utf-8')
+                nonce
             )
             
+            if ret != 0:
+                raise Exception(f"解密失败，错误码: {ret}")
+            
+            # 解析解密后的消息
+            tree = ET.fromstring(xml_content)
+            msg_type = tree.find('MsgType').text
+            
             # 只处理文本消息
-            if msg_data.get('MsgType') != 'text':
+            if msg_type != 'text':
                 return 'success', 200
             
-            user_id = msg_data.get('FromUserName')
-            content = msg_data.get('Content', '').strip()
+            user_id = tree.find('FromUserName').text
+            content_node = tree.find('Content')
+            content = content_node.text if content_node is not None else ''
+            content = content.strip()
             
             # 第一步：检测是否是 URL（优先处理）
             if is_url(content):
