@@ -9,6 +9,11 @@
 import os
 import re
 import sys
+import threading
+import time
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
@@ -16,16 +21,77 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'weworkapi_python-master', 'callback_python3'))
 from WXBizMsgCrypt import WXBizMsgCrypt
 import xml.etree.ElementTree as ET
+# 加载环境变量（最优先）
+load_dotenv()
+
+# 日志级别配置（可通过环境变量 LOG_LEVEL 配置，默认 INFO）
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOG_LEVEL_MAP = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL
+}
+DEFAULT_LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL, logging.INFO)
+
+# 配置日志（在其他导入之前，确保日志系统先初始化）
+def setup_logging():
+    """配置日志，同时输出到文件和控制台"""
+    # 创建日志目录
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+    
+    # 日志文件路径
+    log_file = log_dir / 'app.log'
+    
+    # 配置日志格式
+    log_format = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # 获取根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(DEFAULT_LOG_LEVEL)
+    
+    # 清除已有的处理器（包括可能存在的默认处理器）
+    root_logger.handlers = []
+    
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(DEFAULT_LOG_LEVEL)
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
+    
+    # 文件处理器（支持轮转，最大10MB，保留5个备份）
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(DEFAULT_LOG_LEVEL)
+    file_handler.setFormatter(log_format)
+    root_logger.addHandler(file_handler)
+    
+    logging.info(f"日志级别设置为: {LOG_LEVEL} ({DEFAULT_LOG_LEVEL})")
+    
+    # Flask/Werkzeug 日志配置 - 禁用 werkzeug 的日志输出
+    werkzeug_logger = logging.getLogger('werkzeug')
+    werkzeug_logger.setLevel(logging.WARNING)  # 只显示警告和错误
+    werkzeug_logger.handlers = []
+    werkzeug_logger.propagate = False  # 不传播，完全禁用输出
+
+# 先初始化日志系统（在导入其他模块之前）
+setup_logging()
+
+# 现在安全导入其他模块（日志系统已初始化）
+from utils.proxy import ProxyManager
 from wechat.api import WeChatAPI
 from github_api.api import GitHubAPI
 from utils.locks import TaskLock
 from qingstor_api.client import QingStorClient
-
-# 加载环境变量
-load_dotenv()
-
-# 导入代理管理器
-from utils.proxy import ProxyManager
 
 app = Flask(__name__)
 
@@ -65,6 +131,7 @@ if os.getenv('QINGSTOR_ACCESS_KEY_ID'):
         access_key_id=os.getenv('QINGSTOR_ACCESS_KEY_ID'),
         secret_access_key=os.getenv('QINGSTOR_SECRET_ACCESS_KEY'),
         zone=os.getenv('QINGSTOR_ZONE', 'pek3a'),
+        bucket=os.getenv('QINGSTOR_BUCKET'),  # None 时会从环境变量读取或使用默认值
         proxy_manager_ref=proxy_manager
     )
 
@@ -124,9 +191,85 @@ def send_response(user_id: str, content: str):
         content: 消息内容
     """
     try:
+        app.logger.info(f"发送消息给用户 - 用户: {user_id}, 内容长度: {len(content)} 字符")
+        app.logger.info(f"消息内容: {content}")
         wx_api.send_text_message(user_id, content)
+        app.logger.info(f"消息发送成功 - 用户: {user_id}")
     except Exception as e:
-        app.logger.error(f"发送消息失败: {str(e)}")
+        app.logger.error(f"发送消息失败 - 用户: {user_id}, 错误: {str(e)}")
+
+
+def monitor_workflow_status(user_id: str, images: list, timeout: int = 600):
+    """
+    监控 GitHub Actions 工作流状态
+    
+    Args:
+        user_id: 用户 ID
+        images: 镜像列表
+        timeout: 超时时间（秒）
+    """
+    def check_status():
+        start_time = time.time()
+        workflow_url = ""
+        last_status = None
+        
+        while time.time() - start_time < timeout:
+            # 等待一段时间再检查
+            time.sleep(30)
+            
+            try:
+                run_info = github_api.get_latest_workflow_run()
+                
+                if not run_info:
+                    continue
+                
+                status = run_info['status']
+                conclusion = run_info.get('conclusion')
+                html_url = run_info['html_url']
+                workflow_url = html_url
+                
+                # 如果状态发生变化，记录日志
+                if status != last_status:
+                    last_status = status
+                    app.logger.info(f"Workflow 状态: {status}, 结论: {conclusion}")
+                
+                # 检查是否完成
+                if status == 'completed':
+                    if conclusion == 'success':
+                        # 成功
+                        success_msg = (
+                            f"🎉 镜像同步成功！\n\n"
+                            f"共 {len(images)} 个镜像已同步完成\n"
+                            f"查看详情: {html_url}"
+                        )
+                        send_response(user_id, success_msg)
+                        break
+                    else:
+                        # 失败
+                        failure_msg = (
+                            f"❌ 镜像同步失败\n\n"
+                            f"共 {len(images)} 个镜像同步出错\n"
+                            f"请查看日志排查问题\n"
+                            f"查看详情: {html_url}"
+                        )
+                        send_response(user_id, failure_msg)
+                        break
+            
+            except Exception as e:
+                app.logger.error(f"检查 workflow 状态失败: {str(e)}")
+        
+        # 超时提示
+        if time.time() - start_time >= timeout:
+            timeout_msg = (
+                f"⏰ 镜像同步超时\n\n"
+                f"未能在 {timeout // 60} 分钟内完成同步\n"
+                f"请手动查看进度: {workflow_url if workflow_url else 'GitHub Actions'}"
+            )
+            send_response(user_id, timeout_msg)
+    
+    # 启动后台线程监控
+    thread = threading.Thread(target=check_status, daemon=True)
+    thread.start()
 
 
 def is_url(content: str) -> bool:
@@ -209,6 +352,12 @@ def health():
 @app.route('/wechat/callback', methods=['GET', 'POST'])
 def wechat_callback():
     """企业微信回调接口"""
+    # 记录请求信息
+    app.logger.info("=" * 60)
+    app.logger.info(f"收到企业微信回调请求: {request.method}")
+    app.logger.info(f"请求路径: {request.path}")
+    app.logger.debug(f"请求参数: {dict(request.args)}")
+    
     if request.method == 'GET':
         # 回调验证
         msg_signature = request.args.get('msg_signature')
@@ -216,16 +365,21 @@ def wechat_callback():
         nonce = request.args.get('nonce')
         echostr = request.args.get('echostr')
         
+        app.logger.debug(f"URL验证请求 - 签名: {msg_signature[:20] if msg_signature else 'None'}..., 时间戳: {timestamp}, 随机数: {nonce}, EchoStr: {echostr[:50] if echostr else 'None'}...")
+        
         if not all([msg_signature, timestamp, nonce, echostr]):
+            app.logger.warning("URL验证失败: 缺少必要参数")
             return '缺少参数', 400
         
         try:
             ret, result = wx_crypt.VerifyURL(msg_signature, timestamp, nonce, echostr)
             if ret != 0:
+                app.logger.error(f"URL验证失败，错误码: {ret}")
                 return '验证失败', 400
+            app.logger.info("URL验证成功")
             return result, 200
         except Exception as e:
-            app.logger.error(f"验证失败: {str(e)}")
+            app.logger.error(f"URL验证异常: {str(e)}")
             return '验证失败', 400
     
     else:
@@ -234,33 +388,53 @@ def wechat_callback():
         timestamp = request.args.get('timestamp')
         nonce = request.args.get('nonce')
         
+        # 记录请求体（加密内容）
+        try:
+            post_data = request.get_data(as_text=True)
+            app.logger.debug(f"消息请求 - 签名: {msg_signature[:20] if msg_signature else 'None'}..., 时间戳: {timestamp}, 随机数: {nonce}")
+            app.logger.debug(f"加密消息体长度: {len(post_data)} 字符")
+            app.logger.debug(f"加密消息体: {post_data[:200]}..." if len(post_data) > 200 else f"加密消息体: {post_data}")
+        except Exception as e:
+            app.logger.warning(f"读取请求体失败: {str(e)}")
+        
         if not all([msg_signature, timestamp, nonce]):
+            app.logger.warning("消息接收失败: 缺少必要参数")
             return '缺少参数', 400
         
         try:
             # 解密消息
+            post_data = request.get_data().decode('utf-8')
             ret, xml_content = wx_crypt.DecryptMsg(
-                request.get_data().decode('utf-8'),
+                post_data,
                 msg_signature,
                 timestamp,
                 nonce
             )
             
             if ret != 0:
+                app.logger.error(f"消息解密失败，错误码: {ret}")
                 raise Exception(f"解密失败，错误码: {ret}")
+            
+            app.logger.debug("消息解密成功")
+            app.logger.debug(f"解密后的消息内容: {xml_content}")
             
             # 解析解密后的消息
             tree = ET.fromstring(xml_content)
             msg_type = tree.find('MsgType').text
             
+            app.logger.debug(f"消息类型: {msg_type}")
+            
             # 只处理文本消息
             if msg_type != 'text':
+                app.logger.info(f"跳过非文本消息: {msg_type}")
                 return 'success', 200
             
             user_id = tree.find('FromUserName').text
             content_node = tree.find('Content')
             content = content_node.text if content_node is not None else ''
             content = content.strip()
+            
+            app.logger.info(f"收到用户消息 - 用户: {user_id}, 内容: {content}")
             
             # 第一步：检测是否是 URL（优先处理）
             if is_url(content):
@@ -283,7 +457,7 @@ def wechat_callback():
                 )
                 return 'success', 200
             
-            # 检查任务锁
+            # 检查任务锁（在检查完成后立即释放检查锁，避免阻塞）
             if task_lock.is_locked():
                 send_response(user_id, "⏳ 已有任务正在处理中，请稍后再试")
                 return 'success', 200
@@ -292,6 +466,9 @@ def wechat_callback():
             if not task_lock.acquire():
                 send_response(user_id, "❌ 获取任务锁失败")
                 return 'success', 200
+            
+            # 在触发前释放锁，允许后续请求
+            task_lock.release()
             
             try:
                 # 格式化镜像名称
@@ -320,20 +497,14 @@ def wechat_callback():
                 success = github_api.append_images(images)
                 
                 if success:
-                    # 触发 GitHub Actions
-                    github_api.trigger_action()
-                    
-                    # 发送成功消息
-                    send_response(
-                        user_id,
-                        f"✅ 镜像同步任务已提交！\n\n共 {len(images)} 个镜像已添加到同步队列\n\n请查看 GitHub Actions 了解同步进度"
-                    )
+                    # 启动后台监控任务（会发送最终的成功/失败消息）
+                    monitor_workflow_status(user_id, images)
                 else:
                     send_response(user_id, "❌ 更新 GitHub 失败")
                 
-            finally:
-                # 释放锁
-                task_lock.release()
+            except Exception as e:
+                app.logger.error(f"处理镜像同步失败: {str(e)}")
+                send_response(user_id, f"❌ 处理失败: {str(e)}")
             
             return 'success', 200
             
@@ -345,4 +516,5 @@ def wechat_callback():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 

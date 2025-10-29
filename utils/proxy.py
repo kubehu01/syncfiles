@@ -6,6 +6,11 @@ import requests
 from typing import Optional, Dict
 from urllib.parse import urlparse
 
+# 延迟获取 logger，避免在模块导入时初始化
+def _get_logger():
+    import logging
+    return logging.getLogger(__name__)
+
 
 class ProxyManager:
     """代理管理器"""
@@ -24,9 +29,9 @@ class ProxyManager:
         
         # 检测到代理时显示提示
         if self.proxy_url:
-            print(f"🌐 检测到代理配置: {self.proxy_url}")
+            _get_logger().info(f"🌐 检测到代理配置: {self.proxy_url}")
             if self.no_proxy_domains:
-                print(f"  直连域名: {', '.join(self.no_proxy_domains)}")
+                _get_logger().info(f"  直连域名: {', '.join(self.no_proxy_domains)}")
             
             # 检测代理可用性
             if check_availability:
@@ -128,22 +133,20 @@ class ProxyManager:
             )
             
             if response.status_code == 200:
-                print(f"✅ 代理可用: {self.proxy_url}")
+                _get_logger().info(f"✅ 代理可用: {self.proxy_url}")
                 return True
             else:
-                print(f"⚠️  代理访问返回非 200 状态码: {response.status_code}")
+                _get_logger().warning(f"⚠️  代理访问返回非 200 状态码: {response.status_code}")
                 return False
                 
         except requests.exceptions.ProxyError:
-            print(f"⚠️  代理连接失败: {self.proxy_url}")
-            print("   将使用非代理模式继续运行")
+            _get_logger().warning(f"⚠️  代理连接失败: {self.proxy_url}\n   将使用非代理模式继续运行")
             return False
         except requests.exceptions.Timeout:
-            print(f"⚠️  代理连接超时: {self.proxy_url}")
-            print("   将使用非代理模式继续运行")
+            _get_logger().warning(f"⚠️  代理连接超时: {self.proxy_url}\n   将使用非代理模式继续运行")
             return False
         except Exception as e:
-            print(f"⚠️  代理检测失败: {str(e)}")
-            print("   将使用非代理模式继续运行")
+            _get_logger().warning(f"⚠️  代理检测失败: {str(e)}\n   将使用非代理模式继续运行")
             return False
+
 
