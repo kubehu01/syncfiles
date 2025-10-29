@@ -22,7 +22,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+tmp
 # Environment
 .env
 .env.local
@@ -41,3 +41,4 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
