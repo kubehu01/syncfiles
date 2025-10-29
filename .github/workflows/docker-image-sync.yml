@@ -2,193 +2,211 @@ name: Docker Image Sync
 
 on:
   push:
-    paths:
-      - 'images.txt'
     branches:
       - main
-  workflow_dispatch:
+      - master
+    paths:
+      - 'images.txt'
 
 jobs:
   sync-images:
     runs-on: ubuntu-latest
     
     steps:
-      - name: 检出代码
+      - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
       
-      - name: 登录阿里云容器镜像服务
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.DOCKER_REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: 显示镜像列表
+      - name: Log in to target Docker registry
         run: |
-          echo "📦 镜像同步任务开始"
-          echo "======================================"
-          if [ ! -f images.txt ]; then
-            echo "⚠️  没有找到 images.txt 文件"
-            exit 0
-          fi
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin ${{ secrets.DOCKER_REGISTRY }}
+      
+      - name: Sync images
+        id: sync
+        run: |
+          set +e  # 不因单条命令失败而退出
           
-          echo "📋 需要同步的镜像列表："
-          echo "---"
+          echo "正在读取 images.txt..."
+          echo "文件内容："
           cat images.txt
-          echo "---"
-      
-      - name: 同步镜像（并行处理）
-        run: |
-          # 记录失败的镜像
-          failed_images=()
-          total_images=0
-          success_images=0
-          
-          # 定义同步镜像的函数
-          sync_image() {
-            local line="$1"
-            local image_name="$2"
-            local tag="$3"
-            local image_basename="$4"
-            local target_image="$5"
-            
-            echo "[$(date '+%H:%M:%S')] 🚀 开始同步: $line"
-            
-            # 拉取源镜像
-            if ! docker pull "$line" > /dev/null 2>&1; then
-              echo "[$(date '+%H:%M:%S')] ❌ 拉取失败: $line"
-              return 1
-            fi
-            
-            # 标记镜像
-            if ! docker tag "$line" "$target_image" > /dev/null 2>&1; then
-              echo "[$(date '+%H:%M:%S')] ❌ 标记失败: $target_image"
-              return 1
-            fi
-            
-            # 推送镜像
-            if ! docker push "$target_image" > /dev/null 2>&1; then
-              echo "[$(date '+%H:%M:%S')] ❌ 推送失败: $target_image"
-              return 1
-            fi
-            
-            echo "[$(date '+%H:%M:%S')] ✅ 成功同步: $target_image"
-            return 0
-          }
-          
-          # 计算总镜像数
-          while IFS= read -r line; do
-            line=$(echo "$line" | xargs)
-            if [ -n "$line" ] && [[ ! "$line" =~ ^# ]]; then
-              ((total_images++))
-            fi
-          done < images.txt
-          
-          echo ""
-          echo "📊 总共需要同步: $total_images 个镜像"
-          echo "⚡ 开始并行处理..."
           echo ""
           
-          # 并行处理镜像
-          while IFS= read -r line; do
-            line=$(echo "$line" | xargs)  # 去除首尾空格
-            if [ -z "$line" ] || [[ "$line" =~ ^# ]]; then
-              continue  # 跳过空行和注释
+          # 创建临时结果文件
+          temp_results=$(mktemp)
+          echo "临时文件: $temp_results"
+          
+          # 逐行处理并启动后台任务
+          job_num=0
+          pids=()
+          
+          while IFS= read -r line || [ -n "$line" ]; do
+            # 跳过空行和注释
+            if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+              continue
             fi
             
-            # 提取仓库、命名空间和标签
-            if [[ $line =~ (.+):([^:]+)$ ]]; then
-              image_name="${BASH_REMATCH[1]}"
-              tag="${BASH_REMATCH[2]}"
-            else
-              image_name="$line"
-              tag="latest"
-            fi
+            ((job_num++))
             
-            # 提取镜像名称（去除仓库部分）
-            image_basename=$(basename "$image_name")
-            
-            # 目标镜像名称
-            target_image="${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_NAMESPACE }}/${image_basename}:${tag}"
-            
-            # 后台执行同步任务
+            # 在子shell中处理每个镜像
             (
-              if sync_image "$line" "$image_name" "$tag" "$image_basename" "$target_image"; then
-                echo "$line" >> /tmp/success_images.txt
+              local_line="$line"
+              local_job_num=$job_num
+              local_temp_results="$temp_results"
+              
+              echo ""
+              echo "========================================"
+              echo "任务 $local_job_num: 开始处理"
+              echo "原始行: $local_line"
+              echo "========================================"
+              
+              # 提取 platform 参数
+              platform=""
+              if [[ "$local_line" =~ --platform=([^[:space:]]+) ]]; then
+                platform="${BASH_REMATCH[1]}"
+                local_line=$(echo "$local_line" | sed 's/--platform=[^[:space:]]*[[:space:]]*//' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+                echo "检测到平台参数: $platform"
+                echo "处理后的行: $local_line"
+              fi
+              
+              # 解析格式: <源镜像> to <目标镜像>:<标签>
+              if [[ "$local_line" =~ ^([^[:space:]]+)[[:space:]]+to[[:space:]]+([^[:space:]]+):([^[:space:]]+)$ ]]; then
+                source="${BASH_REMATCH[1]}"
+                target="${BASH_REMATCH[2]}"
+                tag="${BASH_REMATCH[3]}"
+                full_target="${target}:${tag}"
+                
+                echo "源镜像: $source"
+                echo "目标镜像: $full_target"
+                echo "平台: ${platform:-默认}"
+                echo ""
+                
+                # 拉取镜像
+                echo "任务 $local_job_num: 开始拉取镜像..."
+                pull_success=0
+                
+                if [[ -n "$platform" ]]; then
+                  echo "执行: docker pull --platform=$platform $source"
+                  if docker pull --platform="$platform" "$source" 2>&1; then
+                    pull_success=1
+                    echo "✅ 任务 $local_job_num: 拉取成功"
+                  else
+                    echo "❌ 任务 $local_job_num: 拉取失败"
+                  fi
+                else
+                  echo "执行: docker pull $source"
+                  if docker pull "$source" 2>&1; then
+                    pull_success=1
+                    echo "✅ 任务 $local_job_num: 拉取成功"
+                  else
+                    echo "❌ 任务 $local_job_num: 拉取失败"
+                  fi
+                fi
+                
+                if [[ $pull_success -eq 1 ]]; then
+                  # 标记镜像
+                  echo "执行: docker tag $source $full_target"
+                  if docker tag "$source" "$full_target" 2>&1; then
+                    echo "✅ 任务 $local_job_num: 标记成功"
+                    
+                    # 推送镜像
+                    echo "执行: docker push $full_target"
+                    if docker push "$full_target" 2>&1; then
+                      echo "✅ 任务 $local_job_num: 推送成功"
+                      echo "SUCCESS:$source -> $full_target" >> "$local_temp_results"
+                    else
+                      echo "❌ 任务 $local_job_num: 推送失败"
+                      echo "FAILED:$source -> $full_target" >> "$local_temp_results"
+                    fi
+                  else
+                    echo "❌ 任务 $local_job_num: 标记失败"
+                    echo "FAILED:$source -> $full_target" >> "$local_temp_results"
+                  fi
+                else
+                  echo "❌ 任务 $local_job_num: 操作失败"
+                  echo "FAILED:$source -> $full_target" >> "$local_temp_results"
+                fi
               else
-                echo "$line → $target_image" >> /tmp/failed_images.txt
+                echo "⚠️  任务 $local_job_num: 无法解析此行: $local_line"
               fi
             ) &
             
+            pids+=($!)
           done < images.txt
           
-          # 等待所有后台任务完成
-          wait
+          echo ""
+          echo "总共启动了 $job_num 个任务"
+          echo "等待所有任务完成..."
+          
+          # 等待所有后台任务
+          for pid in "${pids[@]}"; do
+            wait "$pid"
+          done
           
           echo ""
-          echo "======================================"
-          echo "📈 并行任务执行完成"
-          echo "======================================"
-      
-      - name: 清理 Docker 镜像
-        if: always()
-        run: |
-          echo "🧹 清理 Docker 镜像缓存"
-          docker system prune -af --volumes || true
+          echo "所有任务已完成"
           
-      - name: 显示同步结果
-        if: always()
-        run: |
+          # 统计结果
+          success_count=$(grep -c "^SUCCESS:" "$temp_results" 2>/dev/null || echo "0")
+          failed_count=$(grep -c "^FAILED:" "$temp_results" 2>/dev/null || echo "0")
+          
           echo ""
-          echo "======================================"
-          echo "📊 同步结果统计"
-          echo "======================================"
+          echo "========================================"
+          echo "镜像同步完成"
+          echo "成功: $success_count"
+          echo "失败: $failed_count"
+          echo "========================================"
           
-          # 读取成功和失败的镜像列表
-          success_count=0
-          failed_count=0
-          
-          if [ -f /tmp/success_images.txt ]; then
-            success_count=$(wc -l < /tmp/success_images.txt | xargs)
+          # 显示失败的镜像
+          if [[ $failed_count -gt 0 ]]; then
             echo ""
-            echo "✅ 成功的数量: $success_count"
-            if [ "$success_count" -gt 0 ]; then
-              echo "具体成功的为："
-              while IFS= read -r line; do
-                echo "  ✓ $line"
-              done < /tmp/success_images.txt
-            fi
-          else
-            echo ""
-            echo "✅ 成功的数量: 0"
+            echo "失败的镜像："
+            grep "^FAILED:" "$temp_results" || true
           fi
           
-          if [ -f /tmp/failed_images.txt ]; then
-            failed_count=$(wc -l < /tmp/failed_images.txt | xargs)
+          # 显示成功的镜像
+          if [[ $success_count -gt 0 ]]; then
             echo ""
-            echo "❌ 失败的数量: $failed_count"
-            if [ "$failed_count" -gt 0 ]; then
-              echo "具体失败的为："
-              while IFS= read -r line; do
-                echo "  ✗ $line"
-              done < /tmp/failed_images.txt
-            fi
-          else
-            echo ""
-            echo "❌ 失败的数量: 0"
+            echo "成功的镜像："
+            grep "^SUCCESS:" "$temp_results" || true
           fi
           
-          echo ""
-          echo "======================================"
-          echo "🎉 所有任务已完成"
-          echo "======================================"
+          # 保存详细结果到文件
+          echo "success_images<<EOF" >> $GITHUB_OUTPUT
+          grep "^SUCCESS:" "$temp_results" 2>/dev/null || echo "" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
           
-          # 如果所有镜像都失败，则退出
-          if [ -f /tmp/failed_images.txt ] && [ ! -f /tmp/success_images.txt ]; then
+          echo "failed_images<<EOF" >> $GITHUB_OUTPUT
+          grep "^FAILED:" "$temp_results" 2>/dev/null || echo "" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # 清理临时文件
+          rm -f "$temp_results"
+          
+          if [ "$failed_count" -gt 0 ]; then
+            echo "failed=true" >> $GITHUB_OUTPUT
             exit 1
+          else
+            echo "所有镜像同步成功！"
+            echo "failed=false" >> $GITHUB_OUTPUT
           fi
-
+      
+      - name: Clean up
+        if: always()
+        run: |
+          echo "清理本地镜像..."
+          docker image prune -f
+          docker system prune -f
+      
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.sync.outputs.failed }}" = "true" ]; then
+            echo "❌ 部分镜像同步失败"
+            echo "${{ steps.sync.outputs.failed_list }}"
+            exit 1
+          else
+            echo "✅ 所有镜像同步成功"
+          fi
 
