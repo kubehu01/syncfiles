@@ -20,6 +20,9 @@
 - **镜像同步**: GitHub Actions + Docker
 - **对象存储**: 青云 QingStor SDK
 - **并发控制**: 文件锁 + 任务状态管理
+## demo展示
+<img width="930" height="579" alt="image" src="https://github.com/user-attachments/assets/71384aed-1716-4bb2-813b-d121fe0e91de" />
+
 
 ## 快速开始
 
@@ -525,4 +528,5 @@ remote_port = 30000
 ## 许可证
 
 MIT
+
 
