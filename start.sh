@@ -49,36 +49,11 @@ if python -c "import flask; import requests; from github import Github; import q
     echo "✅ 依赖已安装"
     echo ""
     echo "========================================="
-    echo "  启动服务（后台运行）"
+    echo "  启动服务"
     echo "========================================="
     echo ""
-    # 创建日志目录
-    mkdir -p logs
-    
-    # 检查是否已运行
-    if [ -f "app.pid" ]; then
-        OLD_PID=$(cat app.pid)
-        if ps -p $OLD_PID > /dev/null 2>&1; then
-            echo "⚠️  服务已在运行中（PID: $OLD_PID）"
-            echo "如需重启，请先执行: ./stop.sh 或 kill $OLD_PID"
-            exit 1
-        else
-            echo "ℹ️  清理旧的 PID 文件"
-            rm -f app.pid
-        fi
-    fi
-    
-    # 后台启动服务
-    nohup python app.py > logs/app.log 2>&1 &
-    PID=$!
-    echo $PID > app.pid
-    
-    echo "✅ 服务已启动"
-    echo "   PID: $PID"
-    echo "   日志: logs/app.log"
-    echo ""
-    echo "查看日志: tail -f logs/app.log"
-    echo "停止服务: kill $PID"
+    # 直接启动
+    exec python app.py
 else
     echo "⚠️  依赖未完全安装，正在安装..."
     pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -94,36 +69,11 @@ else
         echo "✅ 依赖安装成功"
         echo ""
         echo "========================================="
-        echo "  启动服务（后台运行）"
+        echo "  启动服务"
         echo "========================================="
         echo ""
-        # 创建日志目录
-        mkdir -p logs
-        
-        # 检查是否已运行
-        if [ -f "app.pid" ]; then
-            OLD_PID=$(cat app.pid)
-            if ps -p $OLD_PID > /dev/null 2>&1; then
-                echo "⚠️  服务已在运行中（PID: $OLD_PID）"
-                echo "如需重启，请先执行: kill $OLD_PID"
-                exit 1
-            else
-                echo "ℹ️  清理旧的 PID 文件"
-                rm -f app.pid
-            fi
-        fi
-        
-        # 后台启动服务
-        nohup python app.py > logs/app.log 2>&1 &
-        PID=$!
-        echo $PID > app.pid
-        
-        echo "✅ 服务已启动"
-        echo "   PID: $PID"
-        echo "   日志: logs/app.log"
-        echo ""
-        echo "查看日志: tail -f logs/app.log"
-        echo "停止服务: kill $PID"
+        # 启动服务
+        exec python app.py
     else
         echo "❌ 依赖安装失败，请检查错误信息"
         exit 1

@@ -10,7 +10,8 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && 
 
 # 再复制代码和启动脚本
 COPY . .
-RUN chmod +x /app/docker-entrypoint.sh
+COPY --chmod=755 docker-entrypoint.sh /app/
+# RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 3000
 

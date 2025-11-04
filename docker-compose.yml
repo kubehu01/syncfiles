@@ -1,14 +1,19 @@
-version: '3.8'
+networks:
+  default:
+    name: mydocker_net
+    external: true
 
 services:
   image-sync:
     build: .
     container_name: image-sync
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     env_file:
       - .env
     volumes:
-      - .:/app
+      - ./logs:/app/logs
+      - ./tmp:/app/tmp
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
 

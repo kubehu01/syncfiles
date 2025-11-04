@@ -27,25 +27,36 @@ class TaskLock:
         Returns:
             是否成功获取锁
         """
-        # 检查是否已有锁
-        if self.lock_file.exists():
-            # 检查锁是否超时
-            lock_data = json.loads(self.lock_file.read_text())
-            lock_time = lock_data.get('timestamp', 0)
+        try:
+            # 检查是否已有锁
+            if self.lock_file.exists():
+                # 检查锁是否超时
+                try:
+                    lock_data = json.loads(self.lock_file.read_text())
+                    lock_time = lock_data.get('timestamp', 0)
+                    
+                    if time.time() - lock_time < self.lock_timeout:
+                        return False
+                    else:
+                        # 锁已超时，删除
+                        self.lock_file.unlink()
+                except (json.JSONDecodeError, ValueError, OSError):
+                    # 锁文件损坏或读取失败，删除并重新创建
+                    try:
+                        self.lock_file.unlink()
+                    except OSError:
+                        pass
             
-            if time.time() - lock_time < self.lock_timeout:
-                return False
-            else:
-                # 锁已超时，删除
-                self.lock_file.unlink()
-        
-        # 创建新锁
-        lock_data = {
-            'timestamp': time.time(),
-            'pid': os.getpid()
-        }
-        self.lock_file.write_text(json.dumps(lock_data))
-        return True
+            # 创建新锁
+            lock_data = {
+                'timestamp': time.time(),
+                'pid': os.getpid()
+            }
+            self.lock_file.write_text(json.dumps(lock_data))
+            return True
+        except Exception:
+            # 任何异常都返回 False，表示获取锁失败
+            return False
     
     def release(self) -> bool:
         """
@@ -54,10 +65,14 @@ class TaskLock:
         Returns:
             是否成功释放锁
         """
-        if self.lock_file.exists():
-            self.lock_file.unlink()
+        try:
+            if self.lock_file.exists():
+                self.lock_file.unlink()
+                return True
+            return False
+        except OSError:
+            # 文件删除失败，但锁已失效或不存在，视为成功
             return True
-        return False
     
     def is_locked(self) -> bool:
         """
@@ -69,13 +84,21 @@ class TaskLock:
         if not self.lock_file.exists():
             return False
         
-        lock_data = json.loads(self.lock_file.read_text())
-        lock_time = lock_data.get('timestamp', 0)
-        
-        # 检查是否超时
-        if time.time() - lock_time >= self.lock_timeout:
-            self.release()
+        try:
+            lock_data = json.loads(self.lock_file.read_text())
+            lock_time = lock_data.get('timestamp', 0)
+            
+            # 检查是否超时
+            if time.time() - lock_time >= self.lock_timeout:
+                self.release()
+                return False
+            
+            return True
+        except (json.JSONDecodeError, ValueError, OSError):
+            # 锁文件损坏，视为未锁定
+            try:
+                self.lock_file.unlink()
+            except OSError:
+                pass
             return False
-        
-        return True
 

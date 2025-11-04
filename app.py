@@ -272,6 +272,12 @@ def monitor_workflow_status(user_id: str, images: list, timeout: int = 600):
     thread.start()
 
 
+# 用于去重的字典：记录正在处理的请求（用户ID+内容 -> 时间戳）
+_processing_requests = {}
+_processing_lock = threading.Lock()
+REQUEST_DEDUP_INTERVAL = 5  # 5秒内相同请求只处理一次
+
+
 def is_url(content: str) -> bool:
     """
     检测是否是 URL
@@ -290,16 +296,75 @@ def is_url(content: str) -> bool:
     return bool(re.match(url_pattern, content.strip()))
 
 
-def handle_url_upload(user_id: str, url: str) -> bool:
+def handle_image_sync_async(user_id: str, images: list):
     """
-    处理 URL 上传
+    异步处理镜像同步（后台线程）
+    
+    Args:
+        user_id: 用户 ID
+        images: 镜像列表
+    """
+    # 尝试获取锁（原子操作，避免竞态条件）
+    if not task_lock.acquire():
+        send_response(user_id, "⏳ 已有任务正在处理中，请稍后再试")
+        return
+    
+    try:
+        # 格式化镜像名称（移除平台参数等）
+        source_images = [format_image_name(img) for img in images]
+        
+        # 发送确认消息
+        msg_lines = [f"🔄 正在处理镜像同步请求...\n共 {len(source_images)} 个镜像："]
+        namespace = os.getenv('DOCKER_NAMESPACE', 'namespace')
+        registry = os.getenv('DOCKER_REGISTRY', 'registry.cn-hangzhou.aliyuncs.com')
+        
+        # 构建工作流需要的格式：<源镜像> to <目标镜像>:<标签>
+        workflow_images = []
+        
+        for i, source_image in enumerate(source_images, 1):
+            # 解析源镜像名
+            if ':' in source_image:
+                img_name, img_tag = source_image.split(':', 1)
+            else:
+                img_name, img_tag = source_image, 'latest'
+            
+            # 获取镜像路径部分
+            img_path = img_name.split('/')[-1]
+            target_image = f"{registry}/{namespace}/{img_path}:{img_tag}"
+            
+            # 构建工作流格式：源镜像 to 目标镜像:标签
+            workflow_format = f"{source_image} to {target_image}"
+            workflow_images.append(workflow_format)
+            
+            msg_lines.append(f"{i}. {source_image} → {target_image}")
+        
+        send_response(user_id, '\n'.join(msg_lines))
+        
+        # 更新 GitHub（先清空再写入，只同步本次镜像）
+        success = github_api.append_images(workflow_images)
+        
+        if success:
+            # 启动后台监控任务（会发送最终的成功/失败消息）
+            # 传入源镜像列表用于显示
+            monitor_workflow_status(user_id, source_images)
+        else:
+            send_response(user_id, "❌ 更新 GitHub 失败")
+        
+    except Exception as e:
+        app.logger.error(f"处理镜像同步失败: {str(e)}")
+        send_response(user_id, f"❌ 处理失败: {str(e)}")
+    finally:
+        # 释放锁
+        task_lock.release()
+
+
+def handle_url_upload_async(user_id: str, url: str):
+    """
+    异步处理 URL 上传（后台线程）
     
     Args:
         user_id: 用户 ID
         url: 文件 URL
-        
-    Returns:
-        是否处理成功
     """
     if qingstor_client is None:
         send_response(
@@ -309,7 +374,7 @@ def handle_url_upload(user_id: str, url: str) -> bool:
             "- QINGSTOR_SECRET_ACCESS_KEY\n"
             "- QINGSTOR_ZONE (可选)"
         )
-        return False
+        return
     
     try:
         # 发送开始消息
@@ -328,19 +393,16 @@ def handle_url_upload(user_id: str, url: str) -> bool:
                 f"存储桶: {result['bucket']}\n"
                 f"下载链接: {result['url']}"
             )
-            return True
         else:
             # 发送失败消息
             send_response(
                 user_id,
                 f"❌ 文件上传失败\n\n错误: {result.get('error', '未知错误')}"
             )
-            return False
             
     except Exception as e:
         app.logger.error(f"上传文件失败: {str(e)}")
         send_response(user_id, f"❌ 处理失败: {str(e)}")
-        return False
 
 
 @app.route('/health', methods=['GET'])
@@ -436,9 +498,37 @@ def wechat_callback():
             
             app.logger.info(f"收到用户消息 - 用户: {user_id}, 内容: {content}")
             
+            # 去重检查：避免短时间内重复处理相同请求
+            current_time = time.time()
+            request_key = f"{user_id}:{content}"
+            
+            with _processing_lock:
+                if request_key in _processing_requests:
+                    last_time = _processing_requests[request_key]
+                    if current_time - last_time < REQUEST_DEDUP_INTERVAL:
+                        app.logger.info(f"跳过重复请求: {content} (上次处理时间: {current_time - last_time:.1f}秒前)")
+                        return 'success', 200
+                
+                # 记录处理时间
+                _processing_requests[request_key] = current_time
+                
+                # 清理过期的记录（超过去重间隔的记录）
+                expired_keys = [
+                    k for k, t in _processing_requests.items()
+                    if current_time - t > REQUEST_DEDUP_INTERVAL
+                ]
+                for k in expired_keys:
+                    del _processing_requests[k]
+            
             # 第一步：检测是否是 URL（优先处理）
             if is_url(content):
-                handle_url_upload(user_id, content)
+                # 立即返回，在后台异步处理文件上传
+                thread = threading.Thread(
+                    target=handle_url_upload_async,
+                    args=(user_id, content),
+                    daemon=True
+                )
+                thread.start()
                 return 'success', 200
             
             # 第二步：尝试解析为 Docker 镜像
@@ -457,55 +547,13 @@ def wechat_callback():
                 )
                 return 'success', 200
             
-            # 检查任务锁（在检查完成后立即释放检查锁，避免阻塞）
-            if task_lock.is_locked():
-                send_response(user_id, "⏳ 已有任务正在处理中，请稍后再试")
-                return 'success', 200
-            
-            # 获取锁
-            if not task_lock.acquire():
-                send_response(user_id, "❌ 获取任务锁失败")
-                return 'success', 200
-            
-            # 在触发前释放锁，允许后续请求
-            task_lock.release()
-            
-            try:
-                # 格式化镜像名称
-                images = [format_image_name(img) for img in images]
-                
-                # 发送确认消息
-                msg_lines = [f"🔄 正在处理镜像同步请求...\n共 {len(images)} 个镜像："]
-                namespace = os.getenv('DOCKER_NAMESPACE', 'namespace')
-                registry = os.getenv('DOCKER_REGISTRY', 'registry.cn-hangzhou.aliyuncs.com')
-                
-                for i, image in enumerate(images, 1):
-                    # 解析镜像名
-                    if ':' in image:
-                        img_name, img_tag = image.split(':', 1)
-                    else:
-                        img_name, img_tag = image, 'latest'
-                    
-                    # 获取镜像路径部分
-                    img_path = img_name.split('/')[-1]
-                    target_image = f"{registry}/{namespace}/{img_path}:{img_tag}"
-                    msg_lines.append(f"{i}. {image} → {target_image}")
-                
-                send_response(user_id, '\n'.join(msg_lines))
-                
-                # 更新 GitHub
-                success = github_api.append_images(images)
-                
-                if success:
-                    # 启动后台监控任务（会发送最终的成功/失败消息）
-                    monitor_workflow_status(user_id, images)
-                else:
-                    send_response(user_id, "❌ 更新 GitHub 失败")
-                
-            except Exception as e:
-                app.logger.error(f"处理镜像同步失败: {str(e)}")
-                send_response(user_id, f"❌ 处理失败: {str(e)}")
-            
+            # 立即返回，在后台异步处理镜像同步
+            thread = threading.Thread(
+                target=handle_image_sync_async,
+                args=(user_id, images),
+                daemon=True
+            )
+            thread.start()
             return 'success', 200
             
         except Exception as e:
@@ -516,5 +564,6 @@ def wechat_callback():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
 
