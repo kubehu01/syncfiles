@@ -1,1 +1,0 @@
-ywsj/mindoc:latest to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/mindoc:latest
