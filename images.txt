@@ -1,1 +1,0 @@
-flask to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/flask:latest
