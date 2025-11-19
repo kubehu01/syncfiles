@@ -1,0 +1,1 @@
+datasetteproject/datasette to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/datasette:latest
