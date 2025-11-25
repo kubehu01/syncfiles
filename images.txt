@@ -1,0 +1,1 @@
+vaultwarden/server to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/server:latest
