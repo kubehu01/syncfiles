@@ -1,1 +1,0 @@
-docker.io/valkey/valkey:8 to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/valkey:8
