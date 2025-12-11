@@ -1,1 +1,0 @@
-image: ghcr.io/immich-app/immich-machine-learning:v2 to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/image: ghcr.io/immich-app/immich-machine-learning:v2
