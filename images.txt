@@ -1,0 +1,1 @@
+victoriametrics/vmalert:v1.93.4 to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/vmalert:v1.93.4
