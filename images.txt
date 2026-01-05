@@ -1,0 +1,2 @@
+zabbix/zabbix-server-mysql:6.4-latest to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/zabbix-server-mysql:6.4-latest
+zabbix/zabbix-web-nginx-mysql:6.4-latest to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/zabbix-web-nginx-mysql:6.4-latest
