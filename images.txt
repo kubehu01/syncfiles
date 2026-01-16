@@ -1,0 +1,1 @@
+redis:7.0 to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/redis:7.0
