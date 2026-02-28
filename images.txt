@@ -1,0 +1,1 @@
+confluentinc/cp-kafka:5.3.1 to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/cp-kafka:5.3.1
