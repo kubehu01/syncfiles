@@ -1,0 +1,1 @@
+python:3.11-slim-alpine to registry.cn-hangzhou.aliyuncs.com/syncimage2aliyun/python:3.11-slim-alpine
